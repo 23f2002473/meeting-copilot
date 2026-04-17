@@ -34,6 +34,7 @@ vercel --prod
 ```
 
 Or connect the repo in [vercel.com](https://vercel.com) and it deploys automatically.
+[https://meeting-copilot-gjzap5wdx-rohit-sharmas-projects-712cd68e.vercel.app/](https://meeting-copilot-gjzap5wdx-rohit-sharmas-projects-712cd68e.vercel.app/)
 
 ## Deploy to Netlify
 

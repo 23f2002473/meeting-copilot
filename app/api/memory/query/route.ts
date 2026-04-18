@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { getServerSupabase } from '@/lib/supabase';
-import { embed } from '@/lib/embeddings';
 
 export const maxDuration = 60;
 
@@ -11,7 +10,7 @@ interface QueryBody {
   model: string;
 }
 
-const MEMORY_SYSTEM_PROMPT = `You are a personal meeting memory assistant. You have access to relevant excerpts from the user's past meetings, retrieved by semantic similarity to their question.
+const MEMORY_SYSTEM_PROMPT = `You are a personal meeting memory assistant. You have access to relevant excerpts from the user's past meetings.
 
 Your job is to give accurate, grounded answers based ONLY on what appears in the provided meeting excerpts.
 
@@ -33,41 +32,37 @@ export async function POST(req: NextRequest) {
   const body: QueryBody = await req.json();
   const { question, groqApiKey, model } = body;
 
-  // ── Step 1: Generate embedding for the query ───────────────────────────────
-  let queryEmbedding: number[];
-  try {
-    queryEmbedding = await embed(question);
-  } catch (err) {
-    console.error('Embedding error:', err);
-    // Fallback to full-text search if embedding fails
-    return fallbackTextSearch(question, user.id, groqApiKey, model, req);
-  }
-
-  // ── Step 2: Vector similarity search in Supabase ──────────────────────────
   const supabase = getServerSupabase();
 
-  const { data: vectorResults, error } = await supabase.rpc('match_meeting_chunks', {
-    query_embedding: `[${queryEmbedding.join(',')}]`,
-    match_user_id: user.id,
-    match_count: 8,
-    match_threshold: 0.25,
-  });
+  // ── Full-text search via PostgreSQL tsvector ───────────────────────────────
+  // Try websearch first (supports AND/OR/phrase), fall back to keyword OR search
+  const keywords = question.split(/\s+/).filter(Boolean).slice(0, 8).join(' | ');
 
-  // ── Step 3: Full-text search fallback / supplement ────────────────────────
-  let textResults: Array<{ content: string; chunk_type: string; metadata: Record<string, unknown> }> = [];
-  if (!vectorResults?.length) {
-    const { data } = await supabase
+  let chunks: Array<{ content: string; chunk_type: string; metadata: Record<string, unknown> }> = [];
+
+  // Try websearch_to_tsquery format first
+  const { data: ftsData, error: ftsError } = await supabase
+    .from('meeting_chunks')
+    .select('content, chunk_type, metadata')
+    .eq('user_id', user.id)
+    .textSearch('content', keywords, { type: 'websearch' })
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (!ftsError && ftsData && ftsData.length > 0) {
+    chunks = ftsData;
+  } else {
+    // Fallback: get the most recent chunks from recent meetings
+    const { data: recentData } = await supabase
       .from('meeting_chunks')
       .select('content, chunk_type, metadata')
       .eq('user_id', user.id)
-      .textSearch('content', question.split(' ').slice(0, 5).join(' | '), { type: 'websearch' })
-      .limit(6);
-    textResults = data ?? [];
+      .order('created_at', { ascending: false })
+      .limit(12);
+    chunks = recentData ?? [];
   }
 
-  const chunks = vectorResults?.length ? vectorResults : textResults;
-
-  if (!chunks || chunks.length === 0) {
+  if (chunks.length === 0) {
     return streamAnswer(
       "I couldn't find any relevant information in your meeting history for that question. Try recording and ending a meeting first so it gets processed into your memory.",
       groqApiKey,
@@ -76,9 +71,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Step 4: Build context for Groq ────────────────────────────────────────
+  // ── Build context for Groq ────────────────────────────────────────────────
   const context = chunks
-    .map((c: { content: string; chunk_type: string; metadata: Record<string, unknown>; similarity?: number }, i: number) => {
+    .map((c, i) => {
       const meta = c.metadata as { meeting_title?: string; meeting_date?: string };
       const dateStr = meta.meeting_date
         ? new Date(meta.meeting_date).toLocaleDateString()
@@ -130,27 +125,4 @@ async function streamAnswer(
       'Cache-Control': 'no-cache',
     },
   });
-}
-
-async function fallbackTextSearch(
-  question: string,
-  userId: string,
-  apiKey: string,
-  model: string,
-  _req: NextRequest
-) {
-  const supabase = getServerSupabase();
-  const keywords = question.split(/\s+/).slice(0, 6).join(' | ');
-
-  const { data } = await supabase
-    .from('meeting_chunks')
-    .select('content, chunk_type, metadata')
-    .eq('user_id', userId)
-    .textSearch('content', keywords, { type: 'websearch' })
-    .limit(6);
-
-  return streamAnswer(question, apiKey, model, data ?? [], data?.map((c: { content: string; chunk_type: string; metadata: Record<string, unknown> }, i: number) => {
-    const meta = c.metadata as { meeting_title?: string; meeting_date?: string };
-    return `[Excerpt ${i + 1} — ${meta.meeting_title ?? 'Untitled'}]\n${c.content}`;
-  }).join('\n\n'));
 }

@@ -9,18 +9,18 @@ const handler = NextAuth({
     }),
   ],
   callbacks: {
-    // Expose the user's Google sub (stable user ID) on the session
     session({ session, token }) {
       return {
         ...session,
         user: { ...session.user, id: token.sub ?? '' },
       };
     },
+    // After sign-in always go to dashboard
+    async redirect({ baseUrl }) {
+      return baseUrl;
+    },
   },
-  pages: {
-    // Stay on the same page after sign-in
-    signIn: '/',
-  },
+  secret: process.env.NEXTAUTH_SECRET,
 });
 
 export { handler as GET, handler as POST };

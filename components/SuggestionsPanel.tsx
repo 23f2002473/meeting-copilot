@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
 import { SuggestionBatch, Suggestion } from '@/lib/types';
 import { formatTime, SUGGESTION_META } from '@/lib/utils';
 import clsx from 'clsx';
@@ -9,6 +9,7 @@ import { useState } from 'react';
 interface Props {
   batches: SuggestionBatch[];
   isLoading: boolean;
+  error: string | null;
   onRefresh: () => void;
   onSuggestionClick: (suggestion: Suggestion) => void;
   hasTranscript: boolean;
@@ -127,6 +128,7 @@ function BatchGroup({
 export default function SuggestionsPanel({
   batches,
   isLoading,
+  error,
   onRefresh,
   onSuggestionClick,
   hasTranscript,
@@ -162,6 +164,14 @@ export default function SuggestionsPanel({
       </div>
 
       {/* Content */}
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-start gap-2 px-3 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
         {batches.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">

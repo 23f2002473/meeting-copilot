@@ -83,7 +83,7 @@ TONE: Confident, expert peer — not a cautious assistant. Give your best analys
 
 export const DEFAULT_SETTINGS: AppSettings = {
   groqApiKey: '',
-  chatModel: 'meta-llama/llama-4-maverick-17b-128e-instruct',
+  chatModel: 'llama-3.3-70b-versatile',
   transcriptionModel: 'whisper-large-v3',
   suggestionSystemPrompt: DEFAULT_SUGGESTION_SYSTEM_PROMPT,
   chatSystemPrompt: DEFAULT_CHAT_SYSTEM_PROMPT,

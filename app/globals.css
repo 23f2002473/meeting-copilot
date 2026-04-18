@@ -65,3 +65,54 @@ body {
 textarea {
   resize: none;
 }
+
+/* Minutes of Meeting rendered markdown */
+.minutes-content h2 {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9ba3b8;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid #1e2130;
+}
+.minutes-content h2:first-child {
+  margin-top: 0;
+}
+.minutes-content ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0.75rem;
+  space-y: 0.25rem;
+}
+.minutes-content li {
+  position: relative;
+  padding-left: 1.1rem;
+  margin-bottom: 0.35rem;
+  color: #c8ccd8;
+  line-height: 1.55;
+}
+.minutes-content li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  color: #4b5263;
+  font-size: 0.65rem;
+  top: 0.2rem;
+}
+.minutes-content p {
+  color: #c8ccd8;
+  margin-bottom: 0.5rem;
+  line-height: 1.6;
+}
+.minutes-content strong {
+  color: #e8eaf0;
+  font-weight: 600;
+}
+.minutes-content hr {
+  border: none;
+  border-top: 1px solid #1e2130;
+  margin: 1rem 0;
+}

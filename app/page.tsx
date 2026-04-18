@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Settings, Download } from 'lucide-react';
+import { Settings, Download, Brain } from 'lucide-react';
+import Link from 'next/link';
+import { useSession } from 'next-auth/react';
 import {
   AppSettings,
   TranscriptChunk,
@@ -16,7 +18,9 @@ import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import SuggestionsPanel from '@/components/SuggestionsPanel';
 import ChatPanel from '@/components/ChatPanel';
+import MinutesPanel from '@/components/MinutesPanel';
 import SettingsModal from '@/components/SettingsModal';
+import AuthButton from '@/components/AuthButton';
 
 // ---------------------------------------------------------------------------
 // Local storage helpers
@@ -73,8 +77,13 @@ async function* readSSEStream(
 // ---------------------------------------------------------------------------
 
 export default function Page() {
+  const { data: session } = useSession();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Active meeting session ID (only set when user is logged in)
+  const [meetingId, setMeetingId] = useState<string | null>(null);
+  const [isEndingMeeting, setIsEndingMeeting] = useState(false);
 
   const [transcriptChunks, setTranscriptChunks] = useState<TranscriptChunk[]>([]);
   const [suggestionBatches, setSuggestionBatches] = useState<SuggestionBatch[]>([]);
@@ -83,8 +92,10 @@ export default function Page() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [isSuggesting, setIsSuggesting] = useState(false);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
+  const [rightTab, setRightTab] = useState<'chat' | 'minutes'>('chat');
 
   // Auto-refresh timer ref (cleared/set when recording state changes)
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -179,6 +190,7 @@ export default function Page() {
     if (!s.groqApiKey || chunks.length === 0) return;
 
     setIsSuggesting(true);
+    setSuggestionError(null);
 
     try {
       const recentTranscript = getRecentTranscript(chunks, s.recentContextChars);
@@ -215,6 +227,8 @@ export default function Page() {
 
       setSuggestionBatches((prev) => [batch, ...prev]);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Suggestion error';
+      setSuggestionError(msg);
       console.error('Suggestion error:', err);
     } finally {
       setIsSuggesting(false);
@@ -254,17 +268,59 @@ export default function Page() {
   // Mic toggle
   // ---------------------------------------------------------------------------
 
+  // Create a meeting record in DB when recording starts (if logged in)
+  const createMeetingSession = useCallback(async () => {
+    if (!session?.user) return;
+    try {
+      const res = await fetch('/api/meetings', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setMeetingId(data.id);
+      }
+    } catch {}
+  }, [session]);
+
+  // End meeting: save all data + trigger embedding pipeline
+  const endMeetingSession = useCallback(async () => {
+    const mid = meetingId;
+    const s = settingsRef.current;
+    if (!mid || !s.groqApiKey) return;
+
+    setIsEndingMeeting(true);
+    try {
+      const chunks = transcriptChunksRef.current;
+      const batches = suggestionBatchesRef.current;
+      const chats = chatMessagesRef.current;
+
+      await fetch(`/api/meetings/${mid}/end`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullTranscript: getFullTranscript(chunks),
+          suggestionsJson: batches,
+          chatJson: chats,
+          groqApiKey: s.groqApiKey,
+          model: s.chatModel,
+        }),
+      });
+      setMeetingId(null);
+    } catch {}
+    finally { setIsEndingMeeting(false); }
+  }, [meetingId]);
+
   const handleToggleMic = useCallback(async () => {
     if (isRecording) {
       stopRecording();
+      await endMeetingSession();
     } else {
       try {
         await startRecording();
+        await createMeetingSession();
       } catch {
         // Error handled in hook
       }
     }
-  }, [isRecording, startRecording, stopRecording]);
+  }, [isRecording, startRecording, stopRecording, createMeetingSession, endMeetingSession]);
 
   // ---------------------------------------------------------------------------
   // Manual refresh
@@ -454,6 +510,28 @@ export default function Page() {
             </div>
           )}
 
+          {/* End Meeting button — only when logged in + recording */}
+          {session?.user && isRecording && (
+            <button
+              onClick={handleToggleMic}
+              disabled={isEndingMeeting}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors disabled:opacity-60"
+            >
+              {isEndingMeeting ? 'Saving…' : 'End & Save Meeting'}
+            </button>
+          )}
+
+          {/* Memory link — only when logged in */}
+          {session?.user && (
+            <Link
+              href="/memory"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#9ba3b8] hover:text-[#e8eaf0] border border-[#1e2130] hover:border-[#5865f2]/40 rounded-lg transition-colors"
+            >
+              <Brain className="w-3.5 h-3.5" />
+              Memory
+            </Link>
+          )}
+
           <button
             onClick={handleExport}
             disabled={transcriptChunks.length === 0 && chatMessages.length === 0}
@@ -474,6 +552,8 @@ export default function Page() {
             <Settings className="w-3.5 h-3.5" />
             {!settings.groqApiKey ? 'Add API Key' : 'Settings'}
           </button>
+
+          <AuthButton />
         </div>
       </header>
 
@@ -496,20 +576,58 @@ export default function Page() {
           <SuggestionsPanel
             batches={suggestionBatches}
             isLoading={isSuggesting}
+            error={suggestionError}
             onRefresh={handleManualRefresh}
             onSuggestionClick={handleSuggestionClick}
             hasTranscript={transcriptChunks.length > 0}
           />
         </div>
 
-        {/* Right — Chat */}
+        {/* Right — Chat / Minutes tabs */}
         <div className="w-[36%] min-w-[280px] flex flex-col overflow-hidden bg-[#0e1016]">
-          <ChatPanel
-            messages={chatMessages}
-            isStreaming={isStreaming}
-            streamingContent={streamingContent}
-            onSend={sendChatMessage}
-          />
+          {/* Tab bar */}
+          <div className="flex border-b border-[#1e2130] shrink-0">
+            <button
+              onClick={() => setRightTab('chat')}
+              className={`flex-1 py-2.5 text-xs font-medium transition-colors ${
+                rightTab === 'chat'
+                  ? 'text-[#e8eaf0] border-b-2 border-[#5865f2] bg-[#5865f2]/5'
+                  : 'text-[#6b7280] hover:text-[#9ba3b8] border-b-2 border-transparent'
+              }`}
+            >
+              Chat
+            </button>
+            <button
+              onClick={() => setRightTab('minutes')}
+              className={`flex-1 py-2.5 text-xs font-medium transition-colors ${
+                rightTab === 'minutes'
+                  ? 'text-[#e8eaf0] border-b-2 border-[#5865f2] bg-[#5865f2]/5'
+                  : 'text-[#6b7280] hover:text-[#9ba3b8] border-b-2 border-transparent'
+              }`}
+            >
+              Minutes
+            </button>
+          </div>
+
+          {/* Tab content */}
+          <div className="flex-1 overflow-hidden">
+            {rightTab === 'chat' ? (
+              <ChatPanel
+                messages={chatMessages}
+                isStreaming={isStreaming}
+                streamingContent={streamingContent}
+                onSend={sendChatMessage}
+              />
+            ) : (
+              <MinutesPanel
+                transcript={getFullTranscript(transcriptChunks).slice(-settings.fullContextChars)}
+                suggestionBatches={suggestionBatches}
+                apiKey={settings.groqApiKey}
+                model={settings.chatModel}
+                onStream={async () => ''}
+              />
+            )}
+          </div>
         </div>
       </div>
 

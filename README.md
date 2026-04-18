@@ -15,7 +15,7 @@ A web app that listens to live audio from your mic, transcribes it with Groq Whi
 | Purpose | Model |
 |---------|-------|
 | Transcription | `whisper-large-v3` |
-| Suggestions + Chat | `meta-llama/llama-4-maverick-17b-128e-instruct` (configurable) |
+| Suggestions + Chat | `llama-3.3-70b-versatile` (configurable) |
 
 ## Quickstart
 
@@ -85,7 +85,7 @@ All settings are stored in browser `localStorage`. Nothing is sent to any server
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Groq API Key | — | Your key from console.groq.com |
-| LLM Model | `meta-llama/llama-4-maverick-17b-128e-instruct` | For suggestions + chat |
+| LLM Model | `llama-3.3-70b-versatile` | For suggestions + chat |
 | Transcription Model | `whisper-large-v3` | Whisper variant |
 | Auto-refresh Interval | 30s | How often audio chunks are sent |
 | Recent Context Window | 3000 chars | ~3 min of speech for suggestions |

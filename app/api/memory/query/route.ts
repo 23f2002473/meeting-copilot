@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { getServerSupabase } from '@/lib/supabase';
 
 export const maxDuration = 60;
@@ -23,7 +24,7 @@ Rules:
 - Be concise and direct — no fluff`;
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
   if (!session?.user) {
     return Response.json({ error: 'Not authenticated' }, { status: 401 });
   }

@@ -1,9 +1,10 @@
 import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { getServerSupabase } from '@/lib/supabase';
 
 /** GET /api/debug/memory — shows what's actually in the DB for this user */
 export async function GET() {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
   if (!session?.user) {
     return Response.json({ error: 'Not authenticated' }, { status: 401 });
   }

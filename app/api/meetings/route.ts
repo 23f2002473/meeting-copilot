@@ -1,10 +1,11 @@
 import { NextRequest } from 'next/server';
 import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { getServerSupabase } from '@/lib/supabase';
 
 /** POST — create a new meeting session */
 export async function POST(req: NextRequest) {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
   if (!session?.user) {
     return Response.json({ error: 'Not authenticated' }, { status: 401 });
   }
@@ -30,7 +31,7 @@ export async function POST(req: NextRequest) {
 
 /** GET — list all meetings for the logged-in user */
 export async function GET() {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
   if (!session?.user) {
     return Response.json({ error: 'Not authenticated' }, { status: 401 });
   }

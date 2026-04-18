@@ -1,644 +1,273 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { Settings, Download, Brain } from 'lucide-react';
+import { useSession, signIn } from 'next-auth/react';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useSession } from 'next-auth/react';
+import Image from 'next/image';
 import {
-  AppSettings,
-  TranscriptChunk,
-  SuggestionBatch,
-  ChatMessage,
-  Suggestion,
-  ExportData,
-} from '@/lib/types';
-import { DEFAULT_SETTINGS } from '@/lib/defaults';
-import { generateId, parseSuggestions } from '@/lib/utils';
-import { useAudioRecorder } from '@/hooks/useAudioRecorder';
-import TranscriptPanel from '@/components/TranscriptPanel';
-import SuggestionsPanel from '@/components/SuggestionsPanel';
-import ChatPanel from '@/components/ChatPanel';
-import MinutesPanel from '@/components/MinutesPanel';
-import SettingsModal from '@/components/SettingsModal';
-import AuthButton from '@/components/AuthButton';
+  Mic, Brain, LogIn, Plus, Clock, FileText,
+  BarChart2, ChevronRight, Loader2, LogOut
+} from 'lucide-react';
+import { signOut } from 'next-auth/react';
+import clsx from 'clsx';
 
-// ---------------------------------------------------------------------------
-// Local storage helpers
-// ---------------------------------------------------------------------------
-
-function loadSettings(): AppSettings {
-  if (typeof window === 'undefined') return DEFAULT_SETTINGS;
-  try {
-    const raw = localStorage.getItem('mc:settings');
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-  } catch {}
-  return DEFAULT_SETTINGS;
+interface MeetingRecord {
+  id: string;
+  title: string;
+  started_at: string;
+  ended_at: string | null;
+  status: 'active' | 'ended' | 'processing';
+  word_count: number;
 }
 
-function saveSettings(s: AppSettings) {
-  localStorage.setItem('mc:settings', JSON.stringify(s));
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString([], {
+    weekday: 'short', month: 'short', day: 'numeric',
+  });
 }
 
-// ---------------------------------------------------------------------------
-// SSE stream reader
-// ---------------------------------------------------------------------------
-
-async function* readSSEStream(
-  response: Response
-): AsyncGenerator<string, void, unknown> {
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const content: string = parsed.choices?.[0]?.delta?.content ?? '';
-          if (content) yield content;
-        } catch {}
-      }
-    }
-  }
+function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// ---------------------------------------------------------------------------
-// Page component
-// ---------------------------------------------------------------------------
+function formatDuration(start: string, end: string | null) {
+  if (!end) return '—';
+  const mins = Math.round((new Date(end).getTime() - new Date(start).getTime()) / 60000);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
 
-export default function Page() {
-  const { data: session } = useSession();
-  const [settings, setSettings] = useState<AppSettings>(loadSettings);
-  const [showSettings, setShowSettings] = useState(false);
+const STATUS_BADGE: Record<string, string> = {
+  active:     'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  processing: 'bg-amber-500/10  text-amber-400  border-amber-500/20',
+  ended:      'bg-[#1a1d2e]     text-[#6b7280]  border-[#1e2130]',
+};
 
-  // Active meeting session ID (only set when user is logged in)
-  const [meetingId, setMeetingId] = useState<string | null>(null);
-  const [isEndingMeeting, setIsEndingMeeting] = useState(false);
+export default function DashboardPage() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
 
-  const [transcriptChunks, setTranscriptChunks] = useState<TranscriptChunk[]>([]);
-  const [suggestionBatches, setSuggestionBatches] = useState<SuggestionBatch[]>([]);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [transcribeError, setTranscribeError] = useState<string | null>(null);
-  const [isSuggesting, setIsSuggesting] = useState(false);
-  const [suggestionError, setSuggestionError] = useState<string | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [streamingContent, setStreamingContent] = useState('');
-  const [rightTab, setRightTab] = useState<'chat' | 'minutes'>('chat');
-
-  // Auto-refresh timer ref (cleared/set when recording state changes)
-  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-
-  const transcriptChunksRef = useRef(transcriptChunks);
-  transcriptChunksRef.current = transcriptChunks;
-
-  const suggestionBatchesRef = useRef(suggestionBatches);
-  suggestionBatchesRef.current = suggestionBatches;
-
-  // ---------------------------------------------------------------------------
-  // Transcript helpers
-  // ---------------------------------------------------------------------------
-
-  function getFullTranscript(chunks: TranscriptChunk[]): string {
-    return chunks.map((c) => c.text).join(' ');
-  }
-
-  function getRecentTranscript(
-    chunks: TranscriptChunk[],
-    maxChars: number
-  ): string {
-    const full = getFullTranscript(chunks);
-    return full.slice(-maxChars);
-  }
-
-  function getPreviousSuggestionsText(batches: SuggestionBatch[]): string {
-    return batches
-      .slice(0, 3) // Last 3 batches to avoid repetition
-      .flatMap((b) => b.suggestions)
-      .map((s) => `- [${s.type}] ${s.preview}`)
-      .join('\n');
-  }
-
-  // ---------------------------------------------------------------------------
-  // Transcription
-  // ---------------------------------------------------------------------------
-
-  const transcribeChunk = useCallback(
-    async (blob: Blob) => {
-      const s = settingsRef.current;
-      if (!s.groqApiKey) return;
-
-      setIsTranscribing(true);
-      setTranscribeError(null);
-
-      try {
-        const form = new FormData();
-        form.append('file', blob, 'audio.webm');
-        form.append('model', s.transcriptionModel);
-
-        const res = await fetch('/api/transcribe', {
-          method: 'POST',
-          headers: { 'x-groq-key': s.groqApiKey },
-          body: form,
-        });
-
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Transcription failed');
-
-        const text: string = data.text?.trim();
-        if (!text) return;
-
-        const chunk: TranscriptChunk = {
-          id: generateId(),
-          text,
-          timestamp: new Date().toISOString(),
-        };
-
-        setTranscriptChunks((prev) => [...prev, chunk]);
-      } catch (err) {
-        setTranscribeError(
-          err instanceof Error ? err.message : 'Transcription error'
-        );
-      } finally {
-        setIsTranscribing(false);
-      }
-    },
-    []
-  );
-
-  // ---------------------------------------------------------------------------
-  // Suggestions
-  // ---------------------------------------------------------------------------
-
-  const fetchSuggestions = useCallback(async () => {
-    const s = settingsRef.current;
-    const chunks = transcriptChunksRef.current;
-
-    if (!s.groqApiKey || chunks.length === 0) return;
-
-    setIsSuggesting(true);
-    setSuggestionError(null);
-
-    try {
-      const recentTranscript = getRecentTranscript(chunks, s.recentContextChars);
-      const fullTranscript = getFullTranscript(chunks).slice(-s.fullContextChars);
-      const previousSuggestions = getPreviousSuggestionsText(
-        suggestionBatchesRef.current
-      );
-
-      const res = await fetch('/api/suggest', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-groq-key': s.groqApiKey,
-        },
-        body: JSON.stringify({
-          recentTranscript,
-          fullTranscript,
-          previousSuggestions,
-          systemPrompt: s.suggestionSystemPrompt,
-          model: s.chatModel,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Suggestion failed');
-
-      const suggestions = parseSuggestions(data.raw);
-
-      const batch: SuggestionBatch = {
-        id: generateId(),
-        suggestions,
-        timestamp: new Date().toISOString(),
-      };
-
-      setSuggestionBatches((prev) => [batch, ...prev]);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Suggestion error';
-      setSuggestionError(msg);
-      console.error('Suggestion error:', err);
-    } finally {
-      setIsSuggesting(false);
-    }
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Auto-refresh: runs every `refreshInterval` seconds while recording
-  // ---------------------------------------------------------------------------
-
-  const { isRecording, error: micError, startRecording, stopRecording } =
-    useAudioRecorder({
-      onChunkReady: transcribeChunk,
-      chunkDuration: settings.refreshInterval,
-    });
+  const [meetings, setMeetings]   = useState<MeetingRecord[]>([]);
+  const [loading, setLoading]     = useState(false);
 
   useEffect(() => {
-    if (!isRecording) {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-      return;
+    if (session?.user) {
+      setLoading(true);
+      fetch('/api/meetings')
+        .then(r => r.json())
+        .then(data => setMeetings(Array.isArray(data) ? data : []))
+        .catch(() => {})
+        .finally(() => setLoading(false));
     }
-
-    // After each transcript chunk is added, fetch suggestions
-    // We do this via effect on transcriptChunks length
-  }, [isRecording]);
-
-  // Fetch suggestions automatically after each new transcript chunk
-  const prevChunkCount = useRef(0);
-  useEffect(() => {
-    if (transcriptChunks.length > prevChunkCount.current) {
-      prevChunkCount.current = transcriptChunks.length;
-      fetchSuggestions();
-    }
-  }, [transcriptChunks.length, fetchSuggestions]);
-
-  // ---------------------------------------------------------------------------
-  // Mic toggle
-  // ---------------------------------------------------------------------------
-
-  // Create a meeting record in DB when recording starts (if logged in)
-  const createMeetingSession = useCallback(async () => {
-    if (!session?.user) return;
-    try {
-      const res = await fetch('/api/meetings', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setMeetingId(data.id);
-      }
-    } catch {}
   }, [session]);
 
-  // End meeting: save all data + trigger embedding pipeline
-  const endMeetingSession = useCallback(async () => {
-    const mid = meetingId;
-    const s = settingsRef.current;
-    if (!mid || !s.groqApiKey) return;
+  // ── Stats ────────────────────────────────────────────────────────────────
+  const totalMeetings  = meetings.filter(m => m.status === 'ended').length;
+  const totalWords     = meetings.reduce((s, m) => s + (m.word_count || 0), 0);
+  const totalMins      = meetings.reduce((s, m) => {
+    if (!m.ended_at) return s;
+    return s + Math.round(
+      (new Date(m.ended_at).getTime() - new Date(m.started_at).getTime()) / 60000
+    );
+  }, 0);
 
-    setIsEndingMeeting(true);
-    try {
-      const chunks = transcriptChunksRef.current;
-      const batches = suggestionBatchesRef.current;
-      const chats = chatMessagesRef.current;
+  // ── Loading ──────────────────────────────────────────────────────────────
+  if (status === 'loading') {
+    return (
+      <div className="flex items-center justify-center h-screen bg-[#0a0b0f]">
+        <Loader2 className="w-6 h-6 text-[#5865f2] animate-spin" />
+      </div>
+    );
+  }
 
-      await fetch(`/api/meetings/${mid}/end`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullTranscript: getFullTranscript(chunks),
-          suggestionsJson: batches,
-          chatJson: chats,
-          groqApiKey: s.groqApiKey,
-          model: s.chatModel,
-        }),
-      });
-      setMeetingId(null);
-    } catch {}
-    finally { setIsEndingMeeting(false); }
-  }, [meetingId]);
+  // ── Not signed in — Landing page ─────────────────────────────────────────
+  if (!session?.user) {
+    return (
+      <div className="min-h-screen bg-[#0a0b0f] flex flex-col">
+        {/* Nav */}
+        <header className="flex items-center justify-between px-6 py-4 border-b border-[#1e2130]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-[#5865f2] flex items-center justify-center text-base">🧠</div>
+            <span className="text-base font-semibold text-[#e8eaf0]">MindCopilot</span>
+          </div>
+          <button
+            onClick={() => signIn('google')}
+            className="flex items-center gap-2 px-4 py-2 bg-[#5865f2] hover:bg-[#4752c4] text-white text-sm font-medium rounded-xl transition-colors"
+          >
+            <LogIn className="w-4 h-4" />
+            Sign in with Google
+          </button>
+        </header>
 
-  const handleToggleMic = useCallback(async () => {
-    if (isRecording) {
-      stopRecording();
-      await endMeetingSession();
-    } else {
-      try {
-        await startRecording();
-        await createMeetingSession();
-      } catch {
-        // Error handled in hook
-      }
-    }
-  }, [isRecording, startRecording, stopRecording, createMeetingSession, endMeetingSession]);
-
-  // ---------------------------------------------------------------------------
-  // Manual refresh
-  // ---------------------------------------------------------------------------
-
-  const handleManualRefresh = useCallback(() => {
-    fetchSuggestions();
-  }, [fetchSuggestions]);
-
-  // ---------------------------------------------------------------------------
-  // Chat
-  // ---------------------------------------------------------------------------
-
-  const chatMessagesRef = useRef(chatMessages);
-  chatMessagesRef.current = chatMessages;
-
-  const sendChatMessage = useCallback(
-    async (userContent: string, prefix?: string) => {
-      const s = settingsRef.current;
-      if (!s.groqApiKey) {
-        setShowSettings(true);
-        return;
-      }
-
-      const userMsg: ChatMessage = {
-        id: generateId(),
-        role: 'user',
-        content: prefix ? `${prefix}\n\n${userContent}` : userContent,
-        timestamp: new Date().toISOString(),
-      };
-
-      setChatMessages((prev) => [...prev, userMsg]);
-      setIsStreaming(true);
-      setStreamingContent('');
-
-      const allMessages = [...chatMessagesRef.current, userMsg];
-
-      try {
-        const transcript = getFullTranscript(transcriptChunksRef.current).slice(
-          -s.fullContextChars
-        );
-
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-groq-key': s.groqApiKey,
-          },
-          body: JSON.stringify({
-            messages: allMessages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            transcript,
-            systemPrompt: s.chatSystemPrompt,
-            model: s.chatModel,
-          }),
-        });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Chat failed');
-        }
-
-        let accumulated = '';
-        for await (const chunk of readSSEStream(res)) {
-          accumulated += chunk;
-          setStreamingContent(accumulated);
-        }
-
-        const assistantMsg: ChatMessage = {
-          id: generateId(),
-          role: 'assistant',
-          content: accumulated,
-          timestamp: new Date().toISOString(),
-        };
-
-        setChatMessages((prev) => [...prev, assistantMsg]);
-      } catch (err) {
-        const errMsg: ChatMessage = {
-          id: generateId(),
-          role: 'assistant',
-          content: `Error: ${err instanceof Error ? err.message : 'Something went wrong'}`,
-          timestamp: new Date().toISOString(),
-        };
-        setChatMessages((prev) => [...prev, errMsg]);
-      } finally {
-        setIsStreaming(false);
-        setStreamingContent('');
-      }
-    },
-    []
-  );
-
-  // ---------------------------------------------------------------------------
-  // Suggestion click → chat
-  // ---------------------------------------------------------------------------
-
-  const handleSuggestionClick = useCallback(
-    (suggestion: Suggestion) => {
-      const prefix = `[${suggestion.type.toUpperCase()}] ${suggestion.preview}`;
-      const prompt = `Please expand on this suggestion with a detailed, actionable response I can use right now in the conversation:\n\n${suggestion.detail || suggestion.preview}`;
-      sendChatMessage(prompt, prefix);
-    },
-    [sendChatMessage]
-  );
-
-  // ---------------------------------------------------------------------------
-  // Export
-  // ---------------------------------------------------------------------------
-
-  const handleExport = () => {
-    const exportData: ExportData = {
-      exportedAt: new Date().toISOString(),
-      transcript: transcriptChunks.map((c) => ({
-        timestamp: c.timestamp,
-        text: c.text,
-      })),
-      suggestionBatches: suggestionBatches.map((b) => ({
-        timestamp: b.timestamp,
-        suggestions: b.suggestions.map((s) => ({
-          type: s.type,
-          preview: s.preview,
-          detail: s.detail,
-        })),
-      })),
-      chat: chatMessages.map((m) => ({
-        timestamp: m.timestamp,
-        role: m.role,
-        content: m.content,
-      })),
-    };
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `mindcopilot-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  // ---------------------------------------------------------------------------
-  // Settings save
-  // ---------------------------------------------------------------------------
-
-  const handleSettingsSave = (s: AppSettings) => {
-    setSettings(s);
-    saveSettings(s);
-  };
-
-  // Show settings on first load if no API key
-  useEffect(() => {
-    if (!settings.groqApiKey) setShowSettings(true);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const combinedError = micError || transcribeError;
-
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
-
-  return (
-    <div className="flex flex-col h-screen bg-[#0a0b0f] overflow-hidden">
-      {/* ─── Top bar ─── */}
-      <header className="flex items-center justify-between px-4 py-2.5 border-b border-[#1e2130] bg-[#0e1016] shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-[#5865f2] flex items-center justify-center text-sm">
+        {/* Hero */}
+        <div className="flex flex-col items-center justify-center flex-1 text-center px-4 py-20">
+          <div className="w-20 h-20 rounded-3xl bg-[#5865f2]/15 border border-[#5865f2]/25 flex items-center justify-center mb-8 text-4xl">
             🧠
           </div>
-          <div>
-            <span className="text-sm font-semibold text-[#e8eaf0]">MindCopilot</span>
-            <span className="text-xs text-[#4b5263] ml-2">Real-time Meeting Assistant</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Recording indicator */}
-          {isRecording && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-              <span className="text-[10px] text-red-400 font-medium">Recording</span>
-            </div>
-          )}
-
-          {/* End Meeting button — only when logged in + recording */}
-          {session?.user && isRecording && (
-            <button
-              onClick={handleToggleMic}
-              disabled={isEndingMeeting}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors disabled:opacity-60"
-            >
-              {isEndingMeeting ? 'Saving…' : 'End & Save Meeting'}
-            </button>
-          )}
-
-          {/* Memory link — only when logged in */}
-          {session?.user && (
-            <Link
-              href="/memory"
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#9ba3b8] hover:text-[#e8eaf0] border border-[#1e2130] hover:border-[#5865f2]/40 rounded-lg transition-colors"
-            >
-              <Brain className="w-3.5 h-3.5" />
-              Memory
-            </Link>
-          )}
-
+          <h1 className="text-4xl font-bold text-[#e8eaf0] mb-4 leading-tight">
+            Your AI Meeting Copilot
+          </h1>
+          <p className="text-lg text-[#6b7280] max-w-xl mb-10 leading-relaxed">
+            Real-time transcription, live suggestions, and a personal memory that
+            remembers every decision, action item, and discussion — forever.
+          </p>
           <button
-            onClick={handleExport}
-            disabled={transcriptChunks.length === 0 && chatMessages.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#9ba3b8] hover:text-[#e8eaf0] border border-[#1e2130] hover:border-[#2d3250] rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            onClick={() => signIn('google')}
+            className="flex items-center gap-2.5 px-6 py-3 bg-[#5865f2] hover:bg-[#4752c4] text-white font-semibold rounded-xl transition-colors text-sm shadow-lg shadow-[#5865f2]/20"
           >
-            <Download className="w-3.5 h-3.5" />
-            Export
+            <LogIn className="w-4 h-4" />
+            Get started with Google
           </button>
 
-          <button
-            onClick={() => setShowSettings(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-lg transition-colors ${
-              !settings.groqApiKey
-                ? 'text-amber-400 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20'
-                : 'text-[#9ba3b8] hover:text-[#e8eaf0] border-[#1e2130] hover:border-[#2d3250]'
-            }`}
-          >
-            <Settings className="w-3.5 h-3.5" />
-            {!settings.groqApiKey ? 'Add API Key' : 'Settings'}
-          </button>
-
-          <AuthButton />
-        </div>
-      </header>
-
-      {/* ─── Three-column layout ─── */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left — Transcript */}
-        <div className="w-[26%] min-w-[220px] border-r border-[#1e2130] flex flex-col overflow-hidden bg-[#0e1016]">
-          <TranscriptPanel
-            chunks={transcriptChunks}
-            isRecording={isRecording}
-            isTranscribing={isTranscribing}
-            error={combinedError}
-            onToggleMic={handleToggleMic}
-            hasApiKey={!!settings.groqApiKey}
-          />
-        </div>
-
-        {/* Middle — Suggestions */}
-        <div className="flex-1 border-r border-[#1e2130] flex flex-col overflow-hidden bg-[#0a0b0f]">
-          <SuggestionsPanel
-            batches={suggestionBatches}
-            isLoading={isSuggesting}
-            error={suggestionError}
-            onRefresh={handleManualRefresh}
-            onSuggestionClick={handleSuggestionClick}
-            hasTranscript={transcriptChunks.length > 0}
-          />
-        </div>
-
-        {/* Right — Chat / Minutes tabs */}
-        <div className="w-[36%] min-w-[280px] flex flex-col overflow-hidden bg-[#0e1016]">
-          {/* Tab bar */}
-          <div className="flex border-b border-[#1e2130] shrink-0">
-            <button
-              onClick={() => setRightTab('chat')}
-              className={`flex-1 py-2.5 text-xs font-medium transition-colors ${
-                rightTab === 'chat'
-                  ? 'text-[#e8eaf0] border-b-2 border-[#5865f2] bg-[#5865f2]/5'
-                  : 'text-[#6b7280] hover:text-[#9ba3b8] border-b-2 border-transparent'
-              }`}
-            >
-              Chat
-            </button>
-            <button
-              onClick={() => setRightTab('minutes')}
-              className={`flex-1 py-2.5 text-xs font-medium transition-colors ${
-                rightTab === 'minutes'
-                  ? 'text-[#e8eaf0] border-b-2 border-[#5865f2] bg-[#5865f2]/5'
-                  : 'text-[#6b7280] hover:text-[#9ba3b8] border-b-2 border-transparent'
-              }`}
-            >
-              Minutes
-            </button>
-          </div>
-
-          {/* Tab content */}
-          <div className="flex-1 overflow-hidden">
-            {rightTab === 'chat' ? (
-              <ChatPanel
-                messages={chatMessages}
-                isStreaming={isStreaming}
-                streamingContent={streamingContent}
-                onSend={sendChatMessage}
-              />
-            ) : (
-              <MinutesPanel
-                transcript={getFullTranscript(transcriptChunks).slice(-settings.fullContextChars)}
-                suggestionBatches={suggestionBatches}
-                apiKey={settings.groqApiKey}
-                model={settings.chatModel}
-                onStream={async () => ''}
-              />
-            )}
+          {/* Feature cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-16 max-w-2xl w-full">
+            {[
+              { icon: '🎙️', title: 'Live Transcription', desc: 'Whisper Large V3 captures every word in real time' },
+              { icon: '💡', title: 'Smart Suggestions', desc: '3 contextual cards every 30s — questions, insights, fact-checks' },
+              { icon: '🔍', title: 'Meeting Memory', desc: 'Ask questions about any past meeting using semantic search' },
+            ].map(f => (
+              <div key={f.title} className="p-5 rounded-2xl border border-[#1e2130] bg-[#12141a] text-left">
+                <div className="text-2xl mb-3">{f.icon}</div>
+                <p className="text-sm font-semibold text-[#e8eaf0] mb-1">{f.title}</p>
+                <p className="text-xs text-[#6b7280] leading-relaxed">{f.desc}</p>
+              </div>
+            ))}
           </div>
         </div>
       </div>
+    );
+  }
 
-      {/* ─── Settings Modal ─── */}
-      {showSettings && (
-        <SettingsModal
-          settings={settings}
-          onSave={handleSettingsSave}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
+  // ── Signed in — Dashboard ─────────────────────────────────────────────────
+  const user = session.user as { id: string; name?: string; email?: string; image?: string };
+
+  return (
+    <div className="min-h-screen bg-[#0a0b0f] flex flex-col">
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-3.5 border-b border-[#1e2130] bg-[#0e1016] sticky top-0 z-10">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-[#5865f2] flex items-center justify-center text-base">🧠</div>
+          <span className="text-base font-semibold text-[#e8eaf0]">MindCopilot</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/memory"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#9ba3b8] hover:text-[#e8eaf0] border border-[#1e2130] hover:border-[#2d3250] rounded-lg transition-colors"
+          >
+            <Brain className="w-3.5 h-3.5" />
+            Memory
+          </Link>
+          {user.image && (
+            <Image src={user.image} alt="" width={28} height={28} className="rounded-full ring-1 ring-[#2d3250]" />
+          )}
+          <span className="text-xs text-[#9ba3b8] hidden sm:block">{user.name}</span>
+          <button onClick={() => signOut()} className="p-1.5 text-[#6b7280] hover:text-[#e8eaf0] rounded-lg transition-colors" title="Sign out">
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
+
+      <div className="flex-1 max-w-4xl mx-auto w-full px-6 py-8">
+        {/* Welcome */}
+        <div className="mb-8">
+          <h1 className="text-2xl font-bold text-[#e8eaf0] mb-1">
+            Welcome back, {user.name?.split(' ')[0]} 👋
+          </h1>
+          <p className="text-sm text-[#6b7280]">Ready to start your next meeting?</p>
+        </div>
+
+        {/* CTA */}
+        <Link
+          href="/meeting"
+          className="flex items-center justify-between px-6 py-5 rounded-2xl bg-[#5865f2] hover:bg-[#4752c4] transition-all shadow-lg shadow-[#5865f2]/20 mb-8 group"
+        >
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center">
+              <Mic className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-white">Start New Meeting</p>
+              <p className="text-xs text-white/60 mt-0.5">Transcription + live suggestions + saved to memory</p>
+            </div>
+          </div>
+          <ChevronRight className="w-5 h-5 text-white/60 group-hover:translate-x-1 transition-transform" />
+        </Link>
+
+        {/* Stats */}
+        <div className="grid grid-cols-3 gap-4 mb-8">
+          {[
+            { icon: BarChart2, label: 'Meetings recorded', value: totalMeetings },
+            { icon: Clock,     label: 'Total hours',       value: totalMins >= 60 ? `${(totalMins/60).toFixed(1)}h` : `${totalMins}m` },
+            { icon: FileText,  label: 'Words transcribed', value: totalWords > 1000 ? `${(totalWords/1000).toFixed(1)}k` : totalWords },
+          ].map(s => (
+            <div key={s.label} className="p-4 rounded-xl border border-[#1e2130] bg-[#12141a]">
+              <s.icon className="w-4 h-4 text-[#5865f2] mb-2" />
+              <p className="text-xl font-bold text-[#e8eaf0]">{s.value || '—'}</p>
+              <p className="text-[11px] text-[#6b7280] mt-0.5">{s.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Memory shortcut */}
+        <Link
+          href="/memory"
+          className="flex items-center justify-between px-5 py-4 rounded-2xl border border-[#1e2130] bg-[#12141a] hover:border-[#5865f2]/30 hover:bg-[#5865f2]/5 transition-all mb-8 group"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#5865f2]/10 border border-[#5865f2]/20 flex items-center justify-center">
+              <Brain className="w-5 h-5 text-[#5865f2]" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-[#e8eaf0]">Ask your Meeting Memory</p>
+              <p className="text-xs text-[#6b7280] mt-0.5">"What decisions were made last week?" · "Who owns the backend task?"</p>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-[#4b5263] group-hover:text-[#5865f2] transition-colors" />
+        </Link>
+
+        {/* Recent meetings */}
+        <div>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-[#6b7280] mb-3">Recent Meetings</h2>
+
+          {loading ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="w-5 h-5 text-[#5865f2] animate-spin" />
+            </div>
+          ) : meetings.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 border border-dashed border-[#1e2130] rounded-2xl text-center">
+              <Mic className="w-8 h-8 text-[#2d3250] mb-3" />
+              <p className="text-sm text-[#4b5263]">No meetings yet</p>
+              <p className="text-xs text-[#4b5263] mt-1">Start your first meeting above</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {meetings.slice(0, 10).map(m => (
+                <div
+                  key={m.id}
+                  className="flex items-center justify-between px-4 py-3.5 rounded-xl border border-[#1e2130] bg-[#12141a] hover:border-[#2d3250] transition-colors"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-[#1a1d2e] flex items-center justify-center shrink-0">
+                      <Mic className="w-3.5 h-3.5 text-[#6b7280]" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm text-[#e8eaf0] truncate">{m.title}</p>
+                      <p className="text-[11px] text-[#6b7280] mt-0.5">
+                        {formatDate(m.started_at)} · {formatTime(m.started_at)} · {formatDuration(m.started_at, m.ended_at)}
+                        {m.word_count > 0 && ` · ${m.word_count.toLocaleString()} words`}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={clsx('shrink-0 ml-4 text-[10px] px-2 py-0.5 rounded-md border font-medium', STATUS_BADGE[m.status])}>
+                    {m.status === 'processing' ? 'Indexing…' : m.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

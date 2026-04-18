@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { Mic, MicOff, Loader2, AlertCircle } from 'lucide-react';
+import { Mic, MicOff, Loader2, AlertCircle, Square } from 'lucide-react';
 import { TranscriptChunk } from '@/lib/types';
 import { formatTimestamp } from '@/lib/utils';
 import clsx from 'clsx';
@@ -13,6 +13,9 @@ interface Props {
   error: string | null;
   onToggleMic: () => void;
   hasApiKey: boolean;
+  isLoggedIn?: boolean;
+  isEndingMeeting?: boolean;
+  onEndMeeting?: () => void;
 }
 
 export default function TranscriptPanel({
@@ -22,10 +25,12 @@ export default function TranscriptPanel({
   error,
   onToggleMic,
   hasApiKey,
+  isLoggedIn,
+  isEndingMeeting,
+  onEndMeeting,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to latest transcript
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chunks]);
@@ -48,17 +53,17 @@ export default function TranscriptPanel({
           )}
         </div>
 
-        {/* Mic toggle button */}
+        {/* Mic toggle */}
         <button
           onClick={onToggleMic}
-          disabled={!hasApiKey}
+          disabled={!hasApiKey || isEndingMeeting}
           title={!hasApiKey ? 'Add Groq API key in Settings first' : undefined}
           className={clsx(
             'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200',
             isRecording
               ? 'bg-red-500/15 text-red-400 border border-red-500/30 recording-pulse hover:bg-red-500/25'
               : 'bg-[#1a1d2e] text-[#9ba3b8] border border-[#1e2130] hover:border-[#5865f2] hover:text-[#e8eaf0]',
-            !hasApiKey && 'opacity-40 cursor-not-allowed'
+            (!hasApiKey || isEndingMeeting) && 'opacity-40 cursor-not-allowed'
           )}
         >
           {isRecording ? (
@@ -76,11 +81,37 @@ export default function TranscriptPanel({
         </button>
       </div>
 
+      {/* ── END & SAVE MEETING — shown prominently when recording + logged in ── */}
+      {isRecording && isLoggedIn && (
+        <button
+          onClick={onEndMeeting}
+          disabled={isEndingMeeting}
+          className={clsx(
+            'mx-3 mt-3 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border',
+            isEndingMeeting
+              ? 'bg-[#1a1d2e] text-[#6b7280] border-[#1e2130] cursor-not-allowed'
+              : 'bg-red-500/10 text-red-400 border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50'
+          )}
+        >
+          {isEndingMeeting ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Saving to memory…
+            </>
+          ) : (
+            <>
+              <Square className="w-3.5 h-3.5 fill-current" />
+              End &amp; Save Meeting
+            </>
+          )}
+        </button>
+      )}
+
       {/* Status bar */}
       {(isTranscribing || error) && (
         <div
           className={clsx(
-            'flex items-center gap-2 px-4 py-2 text-xs border-b',
+            'flex items-center gap-2 px-4 py-2 text-xs border-b mt-2',
             error
               ? 'bg-red-500/10 border-red-500/20 text-red-400'
               : 'bg-[#5865f2]/10 border-[#5865f2]/20 text-[#9ba3b8]'
@@ -112,16 +143,11 @@ export default function TranscriptPanel({
                   : 'border-[#1e2130] bg-[#1a1d2e]'
               )}
             >
-              <Mic
-                className={clsx(
-                  'w-5 h-5',
-                  isRecording ? 'text-red-400' : 'text-[#4b5263]'
-                )}
-              />
+              <Mic className={clsx('w-5 h-5', isRecording ? 'text-red-400' : 'text-[#4b5263]')} />
             </div>
             <p className="text-sm text-[#4b5263]">
               {isRecording
-                ? 'Listening... transcript appears every 30s'
+                ? 'Listening… transcript appears every 30s'
                 : hasApiKey
                 ? 'Click Start to begin recording'
                 : 'Add your Groq API key in Settings to begin'}
@@ -133,14 +159,7 @@ export default function TranscriptPanel({
               <span className="text-[10px] text-[#4b5263] block mb-0.5">
                 {formatTimestamp(chunk.timestamp)}
               </span>
-              <p
-                className={clsx(
-                  'text-sm leading-relaxed',
-                  i === chunks.length - 1
-                    ? 'text-[#e8eaf0]'
-                    : 'text-[#9ba3b8]'
-                )}
-              >
+              <p className={clsx('text-sm leading-relaxed', i === chunks.length - 1 ? 'text-[#e8eaf0]' : 'text-[#9ba3b8]')}>
                 {chunk.text}
               </p>
             </div>

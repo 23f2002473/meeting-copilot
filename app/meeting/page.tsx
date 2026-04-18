@@ -280,7 +280,7 @@ export default function Page() {
     } catch {}
   }, [session]);
 
-  // End meeting: save all data + trigger embedding pipeline
+  // End meeting: save all data + trigger processing pipeline
   const endMeetingSession = useCallback(async () => {
     const mid = meetingId;
     const s = settingsRef.current;
@@ -292,7 +292,7 @@ export default function Page() {
       const batches = suggestionBatchesRef.current;
       const chats = chatMessagesRef.current;
 
-      await fetch(`/api/meetings/${mid}/end`, {
+      const res = await fetch(`/api/meetings/${mid}/end`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -303,9 +303,20 @@ export default function Page() {
           model: s.chatModel,
         }),
       });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Meeting save error:', err);
+        setTranscribeError(`Failed to save meeting: ${err.error ?? res.status}`);
+      }
+
       setMeetingId(null);
-    } catch {}
-    finally { setIsEndingMeeting(false); }
+    } catch (err) {
+      console.error('endMeetingSession error:', err);
+      setTranscribeError('Failed to save meeting to memory');
+    } finally {
+      setIsEndingMeeting(false);
+    }
   }, [meetingId]);
 
   const handleToggleMic = useCallback(async () => {

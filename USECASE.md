@@ -46,6 +46,19 @@ A clean dashboard showing total meetings recorded, total hours discussed, total 
 ### Export Everything
 Export your entire session — transcript, suggestions, chat — as a JSON file. For people who like receipts. Or evidence.
 
+### Settings — Because You're Not a Default Kind of Person
+MindCopilot doesn't assume it knows better than you. The Settings panel lets you tune everything to match exactly how your brain works:
+
+- **Groq API Key** — plug in your own key, stay in full control of your usage and costs
+- **AI Model** — pick which Groq model powers your suggestions and chat. Want blazing speed? Switch to a faster model. Want deeper reasoning? Go bigger. Your call.
+- **Suggestion System Prompt** — don't like the default suggestion style? Rewrite the prompt entirely. Want the AI to focus only on action items? Done. Want it to be more aggressive about fact-checking? Done. You're the boss.
+- **Chat System Prompt** — customise how the meeting chat assistant behaves. Make it formal for boardroom calls, casual for team standups, or brutally honest for retrospectives.
+- **Recent Context Window** — control how much of the latest transcript the AI reads when generating suggestions. Short attention span meeting? Keep it tight. Deep technical discussion? Open it up.
+- **Full Context Window** — set how much of the entire meeting history gets passed to the chat. More context = smarter answers. More tokens = more cost. You decide the trade-off.
+- **Suggestion Refresh Interval** — how often should MindCopilot generate new suggestions? Every 30 seconds? Every minute? You pick the cadence.
+
+Most apps give you zero knobs to turn. MindCopilot gives you the whole control panel — because one size fits nobody, and you know your meetings better than any default setting ever will.
+
 ---
 
 ## Real Use Cases (From People Who Definitely Exist)
@@ -77,6 +90,7 @@ Runs back-to-back client calls all day. Every insight, decision, and action item
 | Staying sharp | Willpower | Live AI suggestions |
 | Minutes | 30-min post-meeting slog | Auto-generated |
 | Your sanity | Questionable | Preserved |
+| Customisation | Zero knobs | Full control over AI behaviour |
 
 ---
 
